@@ -3,7 +3,11 @@ import logging
 import sqlite3
 import uuid
 import requests
+import os
+import signal
+import sys
 from datetime import datetime
+from pathlib import Path
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, CommandStart
@@ -13,25 +17,46 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice, PreCheckoutQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-# ================== НАСТРОЙКИ (ЗАПОЛНИ СВОИМИ ДАННЫМИ) ==================
+# ================== ЧТЕНИЕ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ==================
+# (Bothost или другие платформы передают их автоматически)
 BOT_TOKEN = os.getenv("8647737296:AAED2Iv94ke5-DLBsimilVXbG2NeQxVcAXw")
 CRYPTOBOT_TOKEN = os.getenv("539520:AAA7DDl4kqFz0j1Y3msbFKkXA0dXgAdxF1E")
 YOOKASSA_PROVIDER_TOKEN = os.getenv("381764678:TEST:168866")
 ADMIN_ID = int(os.getenv("7147395276", 0))
 
-# Цена за одну звезду для каждого способа оплаты
-PRICE_PER_STAR_USD = 0.03      # 1 звезда = 0.03 USD
-PRICE_PER_STAR_RUB = 3          # 1 звезда = 3 рубля
-PRICE_PER_STAR_XTR = 1          # 1 звезда = 1 звезда Telegram (XTR)
+# Цены за одну звезду (можно тоже вынести в переменные, если хочешь)
+PRICE_PER_STAR_USD = float(os.getenv("PRICE_PER_STAR_USD", 0.03))
+PRICE_PER_STAR_RUB = int(os.getenv("PRICE_PER_STAR_RUB", 3))
+PRICE_PER_STAR_XTR = int(os.getenv("PRICE_PER_STAR_XTR", 1))
 
-# Лимиты для количества звёзд
-MIN_STARS = 1
-MAX_STARS = 1_000_000
+# Лимиты
+MIN_STARS = int(os.getenv("MIN_STARS", 1))
+MAX_STARS = int(os.getenv("MAX_STARS", 1000000))
 
-# ================== ИНИЦИАЛИЗАЦИЯ ==================
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+# Проверка обязательных переменных
+required_vars = [BOT_TOKEN, CRYPTOBOT_TOKEN, YOOKASSA_PROVIDER_TOKEN, ADMIN_ID]
+if not all(required_vars) or ADMIN_ID == 0:
+    raise ValueError(
+        "❌ Ошибка: Не все переменные окружения заданы!\n"
+        "Убедитесь, что в настройках хостинга (Bothost) указаны:\n"
+        "BOT_TOKEN, CRYPTOBOT_TOKEN, YOOKASSA_PROVIDER_TOKEN, ADMIN_ID"
+    )
+
+# ================== НАСТРОЙКА ЛОГИРОВАНИЯ ==================
+log_dir = Path("logs")
+log_dir.mkdir(exist_ok=True)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.FileHandler(log_dir / "bot.log", encoding="utf-8"),
+        logging.StreamHandler()
+    ]
+)
 logger = logging.getLogger(__name__)
 
+# ================== ИНИЦИАЛИЗАЦИЯ БОТА ==================
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
@@ -55,42 +80,60 @@ def init_db():
                   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
     conn.commit()
     conn.close()
+    logger.info("База данных инициализирована")
 
 def create_order(order_id, user_id, username, quantity, amount_usd, amount_rub, amount_xtr, payment_method, invoice_id=""):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("INSERT INTO orders (order_id, user_id, username, quantity, amount_usd, amount_rub, amount_xtr, payment_method, invoice_id) VALUES (?,?,?,?,?,?,?,?,?)",
-              (order_id, user_id, username, quantity, amount_usd, amount_rub, amount_xtr, payment_method, invoice_id))
-    conn.commit()
-    conn.close()
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("INSERT INTO orders (order_id, user_id, username, quantity, amount_usd, amount_rub, amount_xtr, payment_method, invoice_id) VALUES (?,?,?,?,?,?,?,?,?)",
+                  (order_id, user_id, username, quantity, amount_usd, amount_rub, amount_xtr, payment_method, invoice_id))
+        conn.commit()
+        conn.close()
+        logger.info(f"Заказ {order_id} создан, метод {payment_method}")
+    except Exception as e:
+        logger.error(f"Ошибка создания заказа: {e}")
 
 def get_pending_orders():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT order_id, user_id, username, quantity, amount_usd, amount_rub, amount_xtr, payment_method, created_at FROM orders WHERE status='pending'")
-    rows = c.fetchall()
-    conn.close()
-    return rows
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("SELECT order_id, user_id, username, quantity, amount_usd, amount_rub, amount_xtr, payment_method, created_at FROM orders WHERE status='pending'")
+        rows = c.fetchall()
+        conn.close()
+        return rows
+    except Exception as e:
+        logger.error(f"Ошибка получения заказов: {e}")
+        return []
 
 def confirm_order(order_id):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("UPDATE orders SET status='completed' WHERE order_id=?", (order_id,))
-    conn.commit()
-    conn.close()
-    return True
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("UPDATE orders SET status='completed' WHERE order_id=?", (order_id,))
+        conn.commit()
+        conn.close()
+        logger.info(f"Заказ {order_id} подтверждён")
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка подтверждения заказа {order_id}: {e}")
+        return False
 
 def get_order(order_id):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT user_id, username, quantity, amount_usd, amount_rub, amount_xtr, payment_method FROM orders WHERE order_id=? AND status='pending'", (order_id,))
-    row = c.fetchone()
-    conn.close()
-    return row
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("SELECT user_id, username, quantity, amount_usd, amount_rub, amount_xtr, payment_method FROM orders WHERE order_id=? AND status='pending'", (order_id,))
+        row = c.fetchone()
+        conn.close()
+        return row
+    except Exception as e:
+        logger.error(f"Ошибка получения заказа {order_id}: {e}")
+        return None
 
 init_db()
 
-# ================== ФУНКЦИИ ДЛЯ РАБОТЫ С CRYPTOBOT API ==================
+# ================== ФУНКЦИИ ДЛЯ CRYPTOBOT API ==================
 def create_crypto_invoice(amount_usd, description, payload):
     url = "https://pay.crypt.bot/api/createInvoice"
     headers = {
@@ -106,12 +149,18 @@ def create_crypto_invoice(amount_usd, description, payload):
         "paid_btn_url": "https://t.me/your_bot",
         "hidden_message": "✅ Спасибо за покупку!"
     }
-    response = requests.post(url, json=data, headers=headers)
-    if response.status_code == 200:
-        result = response.json()
-        if result.get("ok"):
-            return result["result"]
-    logger.error(f"CryptoBot error: {response.text}")
+    try:
+        response = requests.post(url, json=data, headers=headers, timeout=10)
+        if response.status_code == 200:
+            result = response.json()
+            if result.get("ok"):
+                return result["result"]
+            else:
+                logger.error(f"CryptoBot API error: {result}")
+        else:
+            logger.error(f"CryptoBot HTTP error: {response.status_code} - {response.text}")
+    except Exception as e:
+        logger.error(f"Ошибка запроса к CryptoBot: {e}")
     return None
 
 # ================== СОСТОЯНИЯ FSM ==================
@@ -152,8 +201,8 @@ def admin_menu():
 def orders_keyboard(orders):
     builder = InlineKeyboardBuilder()
     for order in orders:
-        oid, uid, username, qty, usd, rub, xtr, method, ts = order
-        builder.button(text=f"Заказ {oid[-8:]} ({qty} ⭐)", callback_data=f"order_{oid}")
+        oid = order[0]
+        builder.button(text=f"Заказ {oid[-8:]} ({order[3]} ⭐)", callback_data=f"order_{oid}")
     builder.button(text="◀️ Назад", callback_data="admin_panel")
     builder.adjust(1)
     return builder.as_markup()
@@ -171,7 +220,7 @@ def order_action_keyboard(order_id):
 async def cmd_start(message: types.Message):
     await message.answer(
         "✨ Добро пожаловать в магазин Telegram Stars!\n"
-        "Вы можете купить любое количество звёзд от 1 до 1 000 000.\n"
+        f"Вы можете купить любое количество звёзд от {MIN_STARS} до {MAX_STARS}.\n"
         "Нажмите кнопку ниже, чтобы начать.",
         reply_markup=main_menu()
     )
@@ -187,12 +236,13 @@ async def help_cb(callback: types.CallbackQuery):
     text = (
         "❓ **Помощь**\n\n"
         "1. Нажмите «💫 Купить звёзды».\n"
-        "2. Введите количество звёзд (целое число от 1 до 1 000 000).\n"
+        "2. Введите количество звёзд.\n"
         "3. Введите @username получателя.\n"
         "4. Выберите способ оплаты.\n"
-        "5. Оплатите счёт.\n"
-        "6. После оплаты (для CryptoBot нужно подтверждение администратора) звёзды будут отправлены.\n\n"
-        "При оплате через ЮKassa или Telegram Stars заказ подтверждается автоматически."
+        "5. Оплатите счёт.\n\n"
+        "**ЮKassa / Telegram Stars**: оплата автоматическая.\n"
+        "**CryptoBot**: после оплаты нужно подтверждение администратора.\n\n"
+        "По вопросам: @support"
     )
     await callback.message.edit_text(text, reply_markup=back_keyboard(), parse_mode="Markdown")
     await callback.answer()
@@ -217,7 +267,6 @@ async def process_quantity(message: types.Message, state: FSMContext):
         await message.answer(f"❌ Количество должно быть от {MIN_STARS} до {MAX_STARS}.")
         return
 
-    # Рассчитываем цены
     usd_price = round(quantity * PRICE_PER_STAR_USD, 2)
     rub_price = quantity * PRICE_PER_STAR_RUB
     xtr_price = quantity * PRICE_PER_STAR_XTR
@@ -268,6 +317,7 @@ async def back_to_username(callback: types.CallbackQuery, state: FSMContext):
 # ================== CRYPTOBOT ==================
 @dp.callback_query(OrderStates.waiting_payment_method, F.data == "pay_crypto")
 async def pay_crypto(callback: types.CallbackQuery, state: FSMContext):
+    await callback.answer()
     data = await state.get_data()
     order_id = str(uuid.uuid4())[:8]
 
@@ -306,16 +356,16 @@ async def pay_crypto(callback: types.CallbackQuery, state: FSMContext):
         reply_markup=kb.as_markup()
     )
     await state.clear()
-    await callback.answer()
 
 # ================== ЮKASSA ==================
 @dp.callback_query(OrderStates.waiting_payment_method, F.data == "pay_yookassa")
 async def pay_yookassa(callback: types.CallbackQuery, state: FSMContext):
+    await callback.answer()
     data = await state.get_data()
     order_id = str(uuid.uuid4())[:8]
     rub_amount = data['rub_price']
 
-    prices = [LabeledPrice(label=f"{data['quantity']} ⭐", amount=rub_amount * 100)]  # в копейках
+    prices = [LabeledPrice(label=f"{data['quantity']} ⭐", amount=rub_amount * 100)]
 
     await bot.send_invoice(
         chat_id=callback.message.chat.id,
@@ -344,11 +394,11 @@ async def pay_yookassa(callback: types.CallbackQuery, state: FSMContext):
         invoice_id=''
     )
     await state.update_data(order_id=order_id)
-    await callback.answer()
 
 # ================== TELEGRAM STARS ==================
 @dp.callback_query(OrderStates.waiting_payment_method, F.data == "pay_stars")
 async def pay_stars(callback: types.CallbackQuery, state: FSMContext):
+    await callback.answer()
     data = await state.get_data()
     order_id = str(uuid.uuid4())[:8]
     xtr_amount = data['xtr_price']
@@ -360,7 +410,7 @@ async def pay_stars(callback: types.CallbackQuery, state: FSMContext):
         title="Покупка звёзд",
         description=f"{data['quantity']} Telegram Stars для @{data['username']}",
         payload=f"stars_{order_id}_{data['username']}_{data['quantity']}",
-        provider_token="",  # для XTR пустая строка
+        provider_token="",
         currency="XTR",
         prices=prices,
         start_parameter="buy_stars",
@@ -382,7 +432,6 @@ async def pay_stars(callback: types.CallbackQuery, state: FSMContext):
         invoice_id=''
     )
     await state.update_data(order_id=order_id)
-    await callback.answer()
 
 # ================== ОБЩИЕ ОБРАБОТЧИКИ ПЛАТЕЖЕЙ ==================
 @dp.pre_checkout_query()
@@ -399,7 +448,6 @@ async def successful_payment_handler(message: types.Message, state: FSMContext):
         username = parts[2]
         quantity = parts[3]
 
-        # Обновляем статус заказа в БД
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute("UPDATE orders SET status='completed' WHERE order_id=?", (order_id,))
@@ -410,6 +458,7 @@ async def successful_payment_handler(message: types.Message, state: FSMContext):
             f"✅ Оплата прошла успешно!\n"
             f"{quantity} звёзд будут отправлены на @{username} в ближайшее время."
         )
+        logger.info(f"Заказ {order_id} оплачен через {method}")
     await state.clear()
 
 # ================== АДМИН-ПАНЕЛЬ ==================
@@ -472,18 +521,21 @@ async def confirm_order_cb(callback: types.CallbackQuery):
     order = get_order(order_id)
     if order:
         user_id, username, qty, usd, rub, xtr, method = order
-        confirm_order(order_id)
-        try:
-            await bot.send_message(
-                user_id,
-                f"✅ Ваш заказ на {qty} звёзд подтверждён!\n"
-                f"Звёзды отправлены на @{username}.\n"
-                f"Спасибо за покупку!"
-            )
-        except Exception as e:
-            logger.error(f"Не удалось уведомить пользователя {user_id}: {e}")
-        await callback.message.edit_text("✅ Заказ подтверждён.", reply_markup=back_keyboard("admin_orders"))
-        await callback.answer("✅ Подтверждено")
+        if confirm_order(order_id):
+            try:
+                await bot.send_message(
+                    user_id,
+                    f"✅ Ваш заказ на {qty} звёзд подтверждён!\n"
+                    f"Звёзды отправлены на @{username}.\n"
+                    f"Спасибо за покупку!"
+                )
+                logger.info(f"Заказ {order_id} подтверждён админом, уведомление отправлено")
+            except Exception as e:
+                logger.error(f"Не удалось уведомить пользователя {user_id}: {e}")
+            await callback.message.edit_text("✅ Заказ подтверждён.", reply_markup=back_keyboard("admin_orders"))
+            await callback.answer("✅ Подтверждено")
+        else:
+            await callback.answer("❌ Ошибка подтверждения", show_alert=True)
     else:
         await callback.answer("❌ Заказ не найден или уже обработан", show_alert=True)
 
@@ -502,21 +554,29 @@ async def reject_order_cb(callback: types.CallbackQuery):
         conn.commit()
         try:
             await bot.send_message(user_id, "❌ Ваш платёж отклонён. Свяжитесь с поддержкой.")
-        except:
-            pass
+            logger.info(f"Заказ {order_id} отклонён")
+        except Exception as e:
+            logger.error(f"Не удалось уведомить пользователя {user_id}: {e}")
     conn.close()
     await callback.message.edit_text("❌ Заказ отклонён.", reply_markup=back_keyboard("admin_orders"))
     await callback.answer("❌ Отклонено")
 
 # ================== ЗАПУСК ==================
 async def main():
-    if not BOT_TOKEN or not CRYPTOBOT_TOKEN or not YOOKASSA_PROVIDER_TOKEN:
-        logger.error("Проверьте настройки токенов в коде!")
-        return
-    logger.info("Бот с произвольным количеством звёзд запущен.")
+    logger.info("🚀 Бот запущен. Версия с произвольным количеством звёзд.")
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
-if __name__ == "__main__":
+def shutdown_handler(signum, frame):
+    logger.info(f"Получен сигнал {signum}. Останавливаем бота...")
+    sys.exit(0)
 
-    asyncio.run(main())
+if __name__ == "__main__":
+    signal.signal(signal.SIGINT, shutdown_handler)
+    signal.signal(signal.SIGTERM, shutdown_handler)
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Бот остановлен.")
+    except Exception as e:
+        logger.exception(f"Критическая ошибка: {e}")
