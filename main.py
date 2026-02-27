@@ -14,10 +14,10 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, LabeledPri
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 # ================== НАСТРОЙКИ (ЗАПОЛНИ СВОИМИ ДАННЫМИ) ==================
-BOT_TOKEN = "8647737296:AAED2Iv94ke5-DLBsimilVXbG2NeQxVcAXw"
-CRYPTOBOT_TOKEN = "539520:AAA7DDl4kqFz0j1Y3msbFKkXA0dXgAdxF1E"
-YOOKASSA_PROVIDER_TOKEN = "381764678:TEST:168866"
-ADMIN_ID = 7147395276  # ваш Telegram ID
+BOT_TOKEN = os.getenv("8647737296:AAED2Iv94ke5-DLBsimilVXbG2NeQxVcAXw")
+CRYPTOBOT_TOKEN = os.getenv("539520:AAA7DDl4kqFz0j1Y3msbFKkXA0dXgAdxF1E")
+YOOKASSA_PROVIDER_TOKEN = os.getenv("381764678:TEST:168866")
+ADMIN_ID = int(os.getenv("7147395276", 0))
 
 # Цена за одну звезду для каждого способа оплаты
 PRICE_PER_STAR_USD = 0.03      # 1 звезда = 0.03 USD
@@ -518,4 +518,5 @@ async def main():
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
+
     asyncio.run(main())
